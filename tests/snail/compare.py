@@ -9,11 +9,16 @@ then, with pyffish built from this fork (python3 setup.py build_ext --inplace at
 
     python3 tests/snail/compare.py positions.jsonl [--max-report 20]
 
+tests/snail/positions.jsonl.gz is a small committed sample (16 seeded games per variant plus the
+sparse starts) that CI checks on every push; regenerate it with the dump command above
+(--games 16 --seed 7, then gzip) whenever the game's rules change.
+
 For every position it compares the legal moves, the position after the move played (snails,
 crushes, castling rights, clocks), and how the game stands afterwards. It exits non-zero on any
 mismatch, so it can run in CI.
 """
 import argparse
+import gzip
 import json
 import os
 import sys
@@ -69,7 +74,8 @@ def main():
         problems[kind].append({"variant": line["variant"], "game": line["game"], "ply": line["ply"],
                                "fen": line["fen"], "move": line["move"], **detail})
 
-    with open(args.positions) as f:
+    opener = gzip.open if args.positions.endswith(".gz") else open
+    with opener(args.positions, "rt") as f:
         for raw in f:
             line = json.loads(raw)
             v, fen, move = line["variant"], line["fen"], line["move"]
