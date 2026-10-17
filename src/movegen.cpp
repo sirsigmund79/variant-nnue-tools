@@ -149,7 +149,7 @@ namespace {
 
     const Bitboard pawns      = pos.pieces(Us, PAWN);
     const Bitboard movable    = pos.board_bb(Us, PAWN) & ~pos.pieces();
-    const Bitboard capturable = pos.board_bb(Us, PAWN) &  pos.pieces(Them);
+    const Bitboard capturable = pos.board_bb(Us, PAWN) &  pos.pieces(Them) & ~pos.snails();
 
     target = Type == EVASIONS ? target : AllSquares;
 
@@ -399,8 +399,8 @@ namespace {
                 target = pos.checkers();
         }
 
-        // Remove inaccessible squares (outside board + wall squares)
-        target &= pos.board_bb();
+        // Remove inaccessible squares (outside board + wall squares, and snails)
+        target &= pos.board_bb() & ~pos.snails();
 
         moveList = generate_pawn_moves<Us, Type>(pos, moveList, target);
         for (PieceSet ps = pos.piece_types() & ~(piece_set(PAWN) | KING); ps;)
@@ -456,7 +456,7 @@ namespace {
     if (pos.count<KING>(Us) && (!Checks || pos.blockers_for_king(~Us) & ksq))
     {
         Bitboard b = (  (pos.attacks_from(Us, KING, ksq) & pos.pieces())
-                      | (pos.moves_from(Us, KING, ksq) & ~pos.pieces())) & (Type == EVASIONS ? ~pos.pieces(Us) : target);
+                      | (pos.moves_from(Us, KING, ksq) & ~pos.pieces())) & (Type == EVASIONS ? ~pos.pieces(Us) : target) & ~pos.snails();
         while (b)
             moveList = make_move_and_gating<NORMAL>(pos, moveList, Us, ksq, pop_lsb(b));
 

@@ -554,6 +554,23 @@ namespace {
     }
 #endif
 
+    // Immortal snail chess: https://chess.stbinf.com/
+    // Standard chess plus two snails ('S' hunts the black king, 's' the white king). After every
+    // movesPerTick full moves each snail steps one square toward the enemy king and crushes what
+    // it lands on. Nothing can capture, land on or pass through a snail (knights jump over).
+    // Rules in detail: Variant::snail* and Position::snail_step()/do_snail_tick().
+    Variant* snail_variant(int movesPerTick, bool straight, bool weak) {
+        Variant* v = chess_variant_base()->init();
+        v->pieceToCharTable = "-";
+        v->add_piece(CUSTOM_PIECE_1, 's', "");
+        v->startFen = "rnbqkbnr/pppppppp/8/s7/S7/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+        v->snailPiece = CUSTOM_PIECE_1;
+        v->snailInterval = 2 * movesPerTick;
+        v->snailStraight = straight;
+        v->snailWeak = weak;
+        return v;
+    }
+
     Variant* isolation_variant() { //https://boardgamegeek.com/boardgame/1875/isolation
         Variant* v = chess_variant_base()->init();
         v->maxRank = RANK_8;
@@ -1857,6 +1874,12 @@ void VariantMap::init() {
     add("pawnback", pawnback_variant());
     add("legan", legan_variant());
     add("fairy", fairy_variant()); // fairy variant used for endgame code initialization
+    // snail-<moves per snail step>-<d: diagonal | s: straight>-<u: unstoppable | w: weak>
+    for (int n : {2, 3, 4})
+        for (bool straight : {false, true})
+            for (bool weak : {false, true})
+                add(std::string("snail-") + char('0' + n) + (straight ? "-s" : "-d") + (weak ? "-w" : "-u"),
+                    snail_variant(n, straight, weak));
     add("makruk", makruk_variant());
     add("makpong", makpong_variant());
     add("cambodian", cambodian_variant());

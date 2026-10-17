@@ -1201,6 +1201,17 @@ namespace {
 
     Score score = SCORE_ZERO;
 
+    // Snails: penalise our king by how soon the enemy snail could reach it, counted in plies on
+    // an empty board (the search sees the real path). A starting point for training, not a
+    // tuned term.
+    if (pos.snail_rule() && pos.count<KING>(Us) && pos.pieces(Them, pos.variant()->snailPiece))
+    {
+        int interval = pos.variant()->snailInterval;
+        int steps = pos.snail_distance(lsb(pos.pieces(Them, pos.variant()->snailPiece)), pos.square<KING>(Us));
+        int plies = interval - pos.game_ply() % interval + std::max(steps - 1, 0) * interval;
+        score -= make_score(1000, 1000) / (plies + 4);
+    }
+
     // Capture the flag
     if (pos.flag_region(Us))
     {

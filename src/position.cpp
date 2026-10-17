@@ -51,6 +51,7 @@ namespace Zobrist {
   Key checks[COLOR_NB][CHECKS_NB];
   Key wall[SQUARE_NB];
   Key endgame[EG_EVAL_NB];
+  Key snailPhase[16]; // plies into the snail cycle, so positions before and after a tick differ
 }
 
 
@@ -192,6 +193,9 @@ void Position::init() {
 
   for (int i = NO_EG_EVAL; i < EG_EVAL_NB; ++i)
       Zobrist::endgame[i] = rng.rand<Key>();
+
+  for (int i = 0; i < 16; ++i)
+      Zobrist::snailPhase[i] = rng.rand<Key>();
 
   // Prepare the cuckoo tables
   std::memset(cuckoo, 0, sizeof(cuckoo));
@@ -655,6 +659,9 @@ void Position::set_state(StateInfo* si) const {
 
   if (sideToMove == BLACK)
       si->key ^= Zobrist::side;
+
+  if (snail_rule())
+      si->key ^= Zobrist::snailPhase[gamePly % var->snailInterval];
 
   si->key ^= Zobrist::castling[si->castlingRights];
 
@@ -1309,6 +1316,11 @@ bool Position::legal(Move m) const {
 
 bool Position::pseudo_legal(const Move m) const {
 
+  // Snails can't be captured or landed on
+  if (snails() & to_sq(m))
+      return false;
+
+
   Color us = sideToMove;
   Square from = from_sq(m);
   Square to = to_sq(m);
@@ -1566,6 +1578,7 @@ void Position::do_move(Move m, StateInfo& newSt, bool givesCheck) {
   newSt.previous = st;
   st = &newSt;
   st->move = m;
+  st->snailTick = false;
 
   // Increment ply counters. In particular, rule50 will be reset to zero later on
   // in case of a capture or a pawn move.
@@ -2094,11 +2107,24 @@ void Position::do_move(Move m, StateInfo& newSt, bool givesCheck) {
       k ^= Zobrist::wall[gating_square(m)];
   }
 
+  if (snail_rule())
+  {
+      k ^= Zobrist::snailPhase[(gamePly - 1) % var->snailInterval] ^ Zobrist::snailPhase[gamePly % var->snailInterval];
+      if (gamePly % var->snailInterval == 0)
+          do_snail_tick(k);
+  }
+
   // Update the key with the final value
   st->key = k;
-  // Calculate checkers bitboard (if move gives check)
-  st->checkersBB = givesCheck ? attackers_to(square<KING>(them), us) & pieces(us) : Bitboard(0);
-  assert(givesCheck == bool(st->checkersBB));
+  // Calculate checkers bitboard (if move gives check). A snail tick can open, block or remove
+  // checks, so after one the checkers are worked out from scratch.
+  if (st->snailTick)
+      st->checkersBB = count<KING>(them) ? attackers_to(square<KING>(them), us) & pieces(us) : Bitboard(0);
+  else
+  {
+      st->checkersBB = givesCheck ? attackers_to(square<KING>(them), us) & pieces(us) : Bitboard(0);
+      assert(givesCheck == bool(st->checkersBB));
+  }
 
   sideToMove = ~sideToMove;
 
@@ -2143,6 +2169,194 @@ void Position::do_move(Move m, StateInfo& newSt, bool givesCheck) {
 }
 
 
+/// Position::snail_distance() is the number of snail steps from a to b on an empty board:
+/// king steps (Chebyshev distance), or rook steps (Manhattan distance) for straight snails.
+
+int Position::snail_distance(Square a, Square b) const {
+  int df = std::abs(file_of(a) - file_of(b)), dr = std::abs(rank_of(a) - rank_of(b));
+  return var->snailStraight ? df + dr : std::max(df, dr);
+}
+
+
+/// Position::snail_step() returns where c's snail steps next when hunting the king on target
+/// (its own square if it waits). This mirrors nextSnailStep() in the game's TypeScript engine
+/// (src/engine/snailEngine.ts), which is the reference: the primary step heads straight for the
+/// target (diagonally when both axes differ; for straight snails along the longer axis, the rank
+/// on a tie). Squares it may enter: anything but the other snail, and for weak snails only empty
+/// squares or the target. If the primary step is closed, unstoppable snails take the open
+/// neighbour that still gets closer (nearest to the target first, then scan order); weak snails
+/// take the first step of the shortest path around the obstacles (breadth-first over open
+/// squares), else an open neighbour that gets closer. Otherwise the snail waits.
+
+Square Position::snail_step(Color c, Square target) const {
+
+  static const int KingSteps[8][2] = {{-1,-1},{-1,0},{-1,1},{0,-1},{0,1},{1,-1},{1,0},{1,1}};
+  static const int RookSteps[4][2] = {{-1,0},{0,-1},{0,1},{1,0}};
+  const bool straight = var->snailStraight;
+  const int (*steps)[2] = straight ? RookSteps : KingSteps;
+  const int stepCount = straight ? 4 : 8;
+
+  Square from = lsb(pieces(c, var->snailPiece));
+  if (from == target)
+      return from;
+  Bitboard other = pieces(~c, var->snailPiece);
+  auto open = [&](Square s) {
+      return !(other & s) && (!var->snailWeak || s == target || s == from || empty(s));
+  };
+  auto neighbours = [&](Square s, Square* out) {
+      int n = 0;
+      for (int i = 0; i < stepCount; ++i)
+      {
+          int f = int(file_of(s)) + steps[i][0], r = int(rank_of(s)) + steps[i][1];
+          if (f >= 0 && r >= 0 && f <= max_file() && r <= max_rank())
+              out[n++] = make_square(File(f), Rank(r));
+      }
+      return n;
+  };
+
+  int sf = file_of(from), sr = rank_of(from), tf = file_of(target), tr = rank_of(target);
+  int df = (tf > sf) - (tf < sf), dr = (tr > sr) - (tr < sr);
+  Square primary = !straight                                ? make_square(File(sf + df), Rank(sr + dr))
+                 : std::abs(tf - sf) > std::abs(tr - sr)    ? make_square(File(sf + df), Rank(sr))
+                                                            : make_square(File(sf), Rank(sr + dr));
+  auto d2 = [&](Square s) {
+      int a = int(file_of(s)) - tf, b = int(rank_of(s)) - tr;
+      return a * a + b * b;
+  };
+  Square options[8];
+  int n = neighbours(from, options);
+  std::stable_sort(options, options + n, [&](Square a, Square b) {
+      return a == primary ? b != primary : b == primary ? false : d2(a) < d2(b);
+  });
+
+  if (var->snailWeak)
+  {
+      int dist[SQUARE_NB];
+      std::fill(std::begin(dist), std::end(dist), -1);
+      Square queue[SQUARE_NB], nb[8];
+      int head = 0, tail = 0;
+      dist[target] = 0;
+      queue[tail++] = target;
+      while (head < tail)
+      {
+          Square q = queue[head++];
+          for (int i = 0, k = neighbours(q, nb); i < k; ++i)
+              if (dist[nb[i]] < 0 && open(nb[i]))
+              {
+                  dist[nb[i]] = dist[q] + 1;
+                  queue[tail++] = nb[i];
+              }
+      }
+      Square best = SQ_NONE;
+      for (int i = 0; i < n; ++i)
+          if (open(options[i]) && dist[options[i]] >= 0 && (best == SQ_NONE || dist[options[i]] < dist[best]))
+              best = options[i];
+      if (best != SQ_NONE)
+          return best;
+  }
+
+  int d = snail_distance(from, target);
+  for (int i = 0; i < n; ++i)
+      if (open(options[i]) && snail_distance(options[i], target) < d)
+          return options[i];
+  return from;
+}
+
+
+/// Position::do_snail_tick() steps both snails at the end of do_move(), White's first. A snail
+/// crushes whatever is on its landing square (weak snails only ever land on empty squares or the
+/// hunted king). After a king is crushed nothing else moves, except that Black's snail still
+/// steps if that step crushes the White king too (both kings fall: a draw). Updates the key k,
+/// the material and pawn keys, castling rights, the en passant square and NNUE dirty pieces,
+/// and records what undo_move() needs.
+
+void Position::do_snail_tick(Key& k) {
+
+  auto& dp = st->dirtyPiece;
+  st->snailTick = true;
+  st->snailFrom[WHITE] = st->snailFrom[BLACK] = SQ_NONE;
+  st->snailCrushed[WHITE] = st->snailCrushed[BLACK] = NO_PIECE;
+
+  for (Color c : {WHITE, BLACK})
+  {
+      if (!pieces(c, var->snailPiece) || !count<KING>(~c))
+          continue;
+      Square sfrom = lsb(pieces(c, var->snailPiece));
+      Square sto = snail_step(c, square<KING>(~c));
+      if (sto == sfrom)
+          continue;
+
+      Piece crushed = piece_on(sto);
+      if (crushed)
+      {
+          if (type_of(crushed) != PAWN && type_of(crushed) != KING)
+              st->nonPawnMaterial[color_of(crushed)] -= PieceValue[MG][crushed];
+          if (Eval::NNUE::useNNUE != Eval::NNUE::UseNNUEMode::False)
+          {
+              dp.piece[dp.dirty_num] = crushed;
+              dp.handPiece[dp.dirty_num] = NO_PIECE;
+              dp.from[dp.dirty_num] = sto;
+              dp.to[dp.dirty_num] = SQ_NONE;
+              dp.dirty_num++;
+          }
+          remove_piece(sto);
+          board[sto] = NO_PIECE;
+          k ^= Zobrist::psq[crushed][sto];
+          st->materialKey ^= Zobrist::psq[crushed][pieceCount[crushed]];
+          if (type_of(crushed) == PAWN)
+              st->pawnKey ^= Zobrist::psq[crushed][sto];
+          if (st->castlingRights && castlingRightsMask[sto])
+          {
+              k ^= Zobrist::castling[st->castlingRights];
+              st->castlingRights &= ~castlingRightsMask[sto];
+              k ^= Zobrist::castling[st->castlingRights];
+          }
+      }
+
+      Piece snail = piece_on(sfrom);
+      if (Eval::NNUE::useNNUE != Eval::NNUE::UseNNUEMode::False)
+      {
+          dp.piece[dp.dirty_num] = snail;
+          dp.handPiece[dp.dirty_num] = NO_PIECE;
+          dp.from[dp.dirty_num] = sfrom;
+          dp.to[dp.dirty_num] = sto;
+          dp.dirty_num++;
+      }
+      move_piece(sfrom, sto);
+      k ^= Zobrist::psq[snail][sfrom] ^ Zobrist::psq[snail][sto];
+      st->snailFrom[c] = sfrom;
+      st->snailTo[c] = sto;
+      st->snailCrushed[c] = crushed;
+
+      if (type_of(crushed) == KING)
+      {
+          bool bothKings =   c == WHITE && color_of(crushed) == BLACK && count<KING>(WHITE)
+                          && snail_step(BLACK, square<KING>(WHITE)) == square<KING>(WHITE);
+          if (!bothKings)
+              break;
+      }
+  }
+
+  // The en passant square goes if a snail sits on it or crushed the pawn that just double-stepped
+  if (st->epSquares)
+  {
+      Color mover = sideToMove; // do_move() flips the side to move after the tick
+      bool valid = !(snails() & st->epSquares);
+      for (Bitboard b = st->epSquares; valid && b; )
+      {
+          Square ep = pop_lsb(b);
+          valid = piece_on(ep + pawn_push(mover)) == make_piece(mover, PAWN);
+      }
+      if (!valid)
+      {
+          for (Bitboard b = st->epSquares; b; )
+              k ^= Zobrist::enpassant[file_of(pop_lsb(b))];
+          st->epSquares = 0;
+      }
+  }
+}
+
+
 /// Position::undo_move() unmakes a move. When it returns, the position should
 /// be restored to exactly the same state as before the move was made.
 
@@ -2151,6 +2365,16 @@ void Position::undo_move(Move m) {
   assert(is_ok(m));
 
   sideToMove = ~sideToMove;
+
+  // Take back the snail tick first: a snail may have crushed the piece that just moved.
+  if (st->snailTick)
+      for (Color c : {BLACK, WHITE})
+          if (st->snailFrom[c] != SQ_NONE)
+          {
+              move_piece(st->snailTo[c], st->snailFrom[c]);
+              if (st->snailCrushed[c])
+                  put_piece(st->snailCrushed[c], st->snailTo[c]);
+          }
 
   Color us = sideToMove;
   Square from = from_sq(m);
@@ -2767,6 +2991,23 @@ bool Position::is_optional_game_end(Value& result, int ply, int countStarted) co
 /// It does not detect stalemates.
 
 bool Position::is_immediate_game_end(Value& result, int ply) const {
+
+  // Snails: a crushed king loses, both kings crushed at once is a draw, and if a snail stepping
+  // away left the opponent's king open to capture, the side to move wins.
+  if (snail_rule())
+  {
+      bool ours = count<KING>(sideToMove), theirs = count<KING>(~sideToMove);
+      if (!ours || !theirs)
+      {
+          result = !ours && !theirs ? VALUE_DRAW : ours ? mate_in(ply) : mated_in(ply);
+          return true;
+      }
+      if (attackers_to(square<KING>(~sideToMove), sideToMove) & pieces(sideToMove))
+      {
+          result = mate_in(ply);
+          return true;
+      }
+  }
 
   // Extinction
   // Extinction does not apply for pseudo-royal pieces, because they can not be captured

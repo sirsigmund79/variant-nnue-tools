@@ -108,6 +108,14 @@ struct Variant {
   WallingRule wallingRule = NO_WALLING;
   Bitboard wallingRegion[COLOR_NB] = {AllSquares, AllSquares};
   bool wallOrMove = false;
+  // Immortal snail chess: one uncapturable, immobile piece per side (snailPiece) that steps one
+  // square toward the enemy king after every snailInterval plies, crushing what it lands on.
+  // snailStraight: rook steps only. snailWeak: only the hunted king can be crushed, any other
+  // piece is in the way and the snail takes the shortest path around it (or waits).
+  PieceType snailPiece = NO_PIECE_TYPE;
+  int snailInterval = 6;
+  bool snailStraight = false;
+  bool snailWeak = false;
   bool seirawanGating = false;
   bool cambodianMoves = false;
   Bitboard diagonalLines = 0;

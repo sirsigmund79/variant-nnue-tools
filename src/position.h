@@ -84,6 +84,11 @@ struct StateInfo {
   bool       bikjang;
   Bitboard   chased;
   bool       pass;
+  // Snail tick made by this move, for undo_move (snailFrom is SQ_NONE for a snail that stayed)
+  bool       snailTick;
+  Square     snailFrom[COLOR_NB];
+  Square     snailTo[COLOR_NB];
+  Piece      snailCrushed[COLOR_NB];
   Move       move;
   int        repetition;
 
@@ -189,6 +194,11 @@ public:
   bool immobility_illegal() const;
   bool gating() const;
   bool walling() const;
+  bool snail_rule() const;
+  Bitboard snails() const;
+  int snail_distance(Square a, Square b) const;
+  Square snail_step(Color c, Square target) const;
+  void do_snail_tick(Key& k);
   WallingRule walling_rule() const;
   bool wall_or_move() const;
   Bitboard walling_region(Color c) const;
@@ -871,6 +881,16 @@ inline bool Position::gating() const {
 inline bool Position::walling() const {
   assert(var != nullptr);
   return var->wallingRule != NO_WALLING;
+}
+
+inline bool Position::snail_rule() const {
+  assert(var != nullptr);
+  return var->snailPiece != NO_PIECE_TYPE;
+}
+
+/// Squares of both snails (empty outside snail variants). Nothing may move onto them.
+inline Bitboard Position::snails() const {
+  return snail_rule() ? pieces(var->snailPiece) : Bitboard(0);
 }
 
 inline WallingRule Position::walling_rule() const {
