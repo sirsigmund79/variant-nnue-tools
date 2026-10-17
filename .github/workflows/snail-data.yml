@@ -1,0 +1,113 @@
+# Immortal snail chess: generate NNUE training data for one snail variant on GitHub's runners
+# (free for public repos), in 8 parallel shards, and publish it as a release that the Colab
+# notebook in sirsigmund79/variant-nnue-pytorch (branch snail) downloads.
+#
+# Start it from the Actions tab: "Snail training data" -> Run workflow. It always builds the
+# snail-tools branch, whichever branch this file is run from.
+name: Snail training data
+
+on:
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: Variant
+        type: choice
+        default: snail-3-d-u
+        options:
+          - snail-3-d-u
+          - snail-3-d-w
+          - snail-3-s-u
+          - snail-3-s-w
+          - snail-2-d-u
+          - snail-2-d-w
+          - snail-2-s-u
+          - snail-2-s-w
+          - snail-4-d-u
+          - snail-4-d-w
+          - snail-4-s-u
+          - snail-4-s-w
+      millions:
+        description: Training positions, in millions (8 shards share them; up to about 60)
+        default: "10"
+      depth:
+        description: Search depth per position
+        default: "6"
+      generation:
+        description: Generation number (0 = hand-written evaluation, no network)
+        default: "0"
+      net_url:
+        description: For generation 1+, a URL to the .nnue to generate with (leave empty for 0)
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, val]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: snail-tools
+      - name: Build the generator
+        working-directory: src
+        run: make -j4 ARCH=x86-64-avx2 build
+      - name: Generate
+        working-directory: src
+        env:
+          VARIANT: ${{ inputs.variant }}
+          MILLIONS: ${{ inputs.millions }}
+          DEPTH: ${{ inputs.depth }}
+          NET_URL: ${{ inputs.net_url }}
+          SHARD: ${{ matrix.shard }}
+        run: |
+          if [ "$SHARD" = val ]; then COUNT=500000; SEED=999; else COUNT=$(( MILLIONS * 1000000 / 8 )); SEED=$(( SHARD + 1 )); fi
+          if [ -n "$NET_URL" ]; then
+            curl -fsSL -o net.nnue "$NET_URL"
+            NNUE="setoption name Use NNUE value true
+          setoption name EvalFile value net.nnue"
+          else
+            NNUE="setoption name Use NNUE value false"
+          fi
+          printf '%s\n' "uci" "setoption name UCI_Variant value $VARIANT" "$NNUE" \
+            "setoption name Threads value 4" "setoption name Hash value 1024" "isready" \
+            "generate_training_data depth $DEPTH count $COUNT seed $SEED random_multi_pv 4 random_multi_pv_diff 100 random_move_count 8 random_move_max_ply 20 write_min_ply 5 eval_limit 10000 set_recommended_uci_options data_format bin output_file_name shard-$SHARD.bin" \
+            "quit" | ./stockfish | grep -v "^info" | tail -20
+          ls -la shard-$SHARD.bin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shard-${{ matrix.shard }}
+          path: src/shard-${{ matrix.shard }}.bin
+          retention-days: 3
+
+  publish:
+    needs: generate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: shards
+          merge-multiple: true
+      - name: Publish as a release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VARIANT: ${{ inputs.variant }}
+          GEN: ${{ inputs.generation }}
+          DEPTH: ${{ inputs.depth }}
+          NET_URL: ${{ inputs.net_url }}
+        run: |
+          TRAIN="$VARIANT-gen$GEN.bin"
+          VAL="$VARIANT-gen$GEN-val.bin"
+          cat shards/shard-[0-7].bin > "$TRAIN"
+          mv shards/shard-val.bin "$VAL"
+          N=$(( $(stat -c %s "$TRAIN") / 72 ))
+          V=$(( $(stat -c %s "$VAL") / 72 ))
+          TAG="data-$VARIANT-gen$GEN-run${{ github.run_number }}"
+          gh release create "$TAG" "$TRAIN" "$VAL" --repo "$GITHUB_REPOSITORY" \
+            --title "Training data: $VARIANT, generation $GEN" \
+            --notes "$N training and $V validation positions for $VARIANT at depth $DEPTH (generation $GEN${NET_URL:+, generated with $NET_URL}). Built from snail-tools at run ${{ github.run_id }}."
+          echo "Published $TAG: $N training + $V validation positions" >> "$GITHUB_STEP_SUMMARY"
