@@ -50,7 +50,7 @@ def expected_status(status):
     if result == "ongoing":
         return {"result": "ongoing"}
     if result == "draw":
-        if status.get("reason") in ("threefold_repetition", "fifty_move_rule", "insufficient_material"):
+        if status.get("reason") in ("threefold_repetition", "fifty_move_rule"):
             return None  # claimable draws: checked per game below
         return {"result": "draw"}
     return {"result": "win", "winner": status["winner"]}
@@ -92,15 +92,11 @@ def main():
                 # A draw the game ends at once (repetition etc.) is still ongoing for the engine.
                 report("game status", line, expected=line["status"], engine=got)
 
-            if "moves" in line and line["status"].get("reason") in ("threefold_repetition", "fifty_move_rule", "insufficient_material"):
-                start = sf.start_fen(v)
-                reason = line["status"]["reason"]
-                if reason == "insufficient_material":
-                    ok = all(sf.has_insufficient_material(v, start, line["moves"]))
-                else:
-                    ok = sf.is_optional_game_end(v, start, line["moves"])[0]
+            if "moves" in line and line["status"].get("reason") in ("threefold_repetition", "fifty_move_rule"):
+                # Repetition needs the whole game, from wherever it started
+                ok = sf.is_optional_game_end(v, line.get("start", sf.start_fen(v)), line["moves"])[0]
                 if not ok:
-                    report("claimable draw", line, expected=reason)
+                    report("claimable draw", line, expected=line["status"]["reason"])
 
     total = sum(checked.values())
     print(f"checked {total} positions in {len(checked)} variants")

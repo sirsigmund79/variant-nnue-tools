@@ -3007,6 +3007,16 @@ bool Position::is_immediate_game_end(Value& result, int ply) const {
           result = mate_in(ply);
           return true;
       }
+      // The game ends dead positions at once, as chess.js judges them with the snails left out:
+      // bare kings, a single knight or bishop, or only bishops that all stand on one colour.
+      Bitboard rest = pieces() ^ pieces(KING) ^ snails();
+      if (   !rest
+          || (!more_than_one(rest) && (rest & (pieces(KNIGHT) | pieces(BISHOP))))
+          || (rest == pieces(BISHOP) && (!(rest & DarkSquares) || !(rest & ~DarkSquares))))
+      {
+          result = VALUE_DRAW;
+          return true;
+      }
   }
 
   // Extinction

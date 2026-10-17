@@ -395,6 +395,13 @@ inline bool has_insufficient_material(Color c, const Position& pos) {
     {
         PieceType pt = pop_lsb(ps);
 
+        // Snails can't give mate: leave them out entirely
+        if (pos.snail_rule() && pt == pos.variant()->snailPiece)
+        {
+            restricted |= pos.pieces(pt);
+            continue;
+        }
+
         // Constrained pieces
         if (pt == KING || !(pos.board_bb(c, pt) & pos.board_bb(~c, KING)) || (pos.extinction_pseudo_royal() && pos.blast_on_capture() && (pos.extinction_piece_types() & pt)))
             restricted |= pos.pieces(c, pt);
